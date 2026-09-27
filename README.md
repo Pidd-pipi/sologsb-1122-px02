@@ -71,7 +71,7 @@ sologsb-1122/
 | 路由 | 页面 | 消费模型 |
 | --- | --- | --- |
 | `/faces` | 掌子面台账：里程区间/岩性/围岩级别/开挖方式筛选 + 级别分布条 | TunnelFace、RockMassGrade |
-| `/faces/:id` | 掌子面详情：基本信息 + 岩性素描图 + 节理组列表 + 与上循环级别比对 | TunnelFace、JointSet、RockMassGrade |
+| `/faces/:id` | 掌子面详情：基本信息、分部位产状测点与当前基准、岩性素描图、节理组列表、级别比对 | TunnelFace、AttitudePoint、JointSet、RockMassGrade |
 | `/faces/:id/joints` | 节理产状录入：极点图/玫瑰图、同组产状合并、异常倾角提示 | JointSet |
 | `/faces/:id/water` | 涌水记录与沿里程趋势折线，标记突变点与建议措施 | WaterInflow |
 | `/grade/:faceId` | 围岩级别判定：逐项输入 RQD/Jv/Kv/出水状态，实时算级别与支护建议，可人工修正并保存 | RockMassGrade、TunnelFace |
@@ -80,8 +80,9 @@ sologsb-1122/
 
 ## 数据存储说明
 
-- 数据库名 `gbtunnelface`，当前结构版本 **v2**（`localStorage['gbtunnelface:db-version']` 记录）。
-- 四张表：`faces`（掌子面）、`joints`（节理组）、`grades`（围岩级别判定）、`waters`（涌水记录）。
+- 数据库名 `gbtunnelface`，当前结构版本 **v3**（`localStorage['gbtunnelface:db-version']` 记录）。
+- 五张表：`faces`（掌子面）、`joints`（节理组）、`grades`（围岩级别判定）、`waters`（涌水记录）、`attitudes`（产状测点）。
+- v2 → v3 迁移：新增 `attitudes` 表，持久保存拱顶、拱腰等分部位产状测点；最新有效测点作为当前岩层基准，无有效测点时沿用掌子面原档案产状。
 - v1 → v2 迁移：为老掌子面补 `attitude`、`mileageRange`，为级别记录补 `correctedBq`、`manualAdjusted`，为涌水补 `chainage`，并新增索引。
 - 岩性素描的结构面线段单独存 `localStorage['gbtunnelface:sketch:<faceId>']`，刷新后仍在。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
@@ -91,6 +92,7 @@ sologsb-1122/
 
 - **围岩级别实时判定**：`BQ = 90 + 3σc + 250Kv`，`[BQ] = BQ − 100(K1 + K2 + K3)`（K1 由出水状态、K2 由洞跨取值），再按 >550/451~550/351~450/251~350/151~250/≤150 映射到 Ⅰ~Ⅵ 级，并给出对应支护建议；支持人工修正级别。
 - **级别比对**：详情页与判定页自动与上一循环级别比对，输出「变好/变差 N 级」结论。
+- **产状测点管理**：在掌子面详情按拱顶、左/右拱腰录入走向、倾向、倾角和测录时间；无效测点必须记录原因留档。有效测点按测录时间倒序排列，最新一条为当前基准，并汇总倾向、倾角范围。节理录入默认带出当前基准；无有效测点或老掌子面无测点时继续沿用原档案产状。
 - **素描交互**：`<SketchCanvas>` 在图上单击即按当前岩层产状布置结构面线段，带岩性填充纹样、比例尺、图例与撤销/清空，线段本地持久化。
 - **节理统计**：`<JointPolarPlot>` 等面积投影极点图 + 走向玫瑰图，按组着色；按倾向 30° 聚类支持同组产状合并。
 - **异常提示**：倾角超出 0~90° 直接拦截；涌水量较上一点翻倍或趋势突增标记为突变点并给出措施。

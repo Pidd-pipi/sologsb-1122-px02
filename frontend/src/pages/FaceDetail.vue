@@ -1,13 +1,22 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useAttitudeStore } from '../stores/attitudeStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
 import GradeTag from '../components/common/GradeTag.vue';
 import { attitudeText, formatChainage } from '../utils/geoMath';
+import {
+  ATTITUDE_INVALID_REASONS,
+  ATTITUDE_POSITIONS,
+  isValidAttitudeValue,
+  validAttitudeRange,
+  type AttitudePointDraft,
+} from '../types/attitude';
 import { GRADE_SUPPORT } from '../types/grade';
 
 const route = useRoute();
@@ -15,16 +24,115 @@ const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
 const gradeStore = useGradeStore();
+const attitudeStore = useAttitudeStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
 const joints = computed(() => jointStore.byFace(faceId.value));
 const grades = computed(() => gradeStore.byFace(faceId.value));
+const validPoints = computed(() => attitudeStore.validByFace(faceId.value));
+const invalidPoints = computed(() => attitudeStore.invalidByFace(faceId.value));
+const currentPoint = computed(() => validPoints.value[0]);
+const attitudeRange = computed(() => validAttitudeRange(validPoints.value));
+const currentAttitude = computed(() =>
+  face.value ? attitudeStore.currentAttitude(faceId.value, face.value.attitude) : undefined,
+);
+const baselineSourceText = computed(() =>
+  currentPoint.value
+    ? `来自 ${currentPoint.value.position} 测点 · ${new Date(currentPoint.value.measuredAt).toLocaleString('zh-CN')}`
+    : '尚无有效测点，沿用原档案产状',
+);
 const latest = computed(() => grades.value[0]);
 const previousGrade = computed(() => grades.value[1]);
 
 const { result, patch } = useGradeCalc(() => joints.value);
 const segmentCount = ref(0);
+const attitudeError = ref('');
+
+const attitudeForm = reactive({
+  position: '拱顶' as AttitudePointDraft['position'],
+  strike: 0,
+  dipDirection: 0,
+  dipAngle: 0,
+  valid: true,
+  invalidReason: '',
+  measuredAt: new Date(),
+});
+
+function fillAttitudeFormFromCurrent(): void {
+  if (!face.value) return;
+  const source = currentAttitude.value ?? face.value.attitude;
+  attitudeForm.strike = source.strike;
+  attitudeForm.dipDirection = source.dipDirection;
+  attitudeForm.dipAngle = source.dipAngle;
+}
+
+function onValidChange(valid: boolean): void {
+  attitudeForm.invalidReason = '';
+  if (valid) {
+    attitudeForm.strike = Math.min(360, Math.max(0, attitudeForm.strike));
+    attitudeForm.dipDirection = Math.min(360, Math.max(0, attitudeForm.dipDirection));
+    attitudeForm.dipAngle = Math.min(90, Math.max(0, attitudeForm.dipAngle));
+  }
+}
+
+async function submitAttitudePoint(): Promise<void> {
+  attitudeError.value = '';
+  if (!face.value) {
+    attitudeError.value = '未指定掌子面';
+    return;
+  }
+  if (!attitudeForm.measuredAt || Number.isNaN(attitudeForm.measuredAt.getTime())) {
+    attitudeError.value = '请选择测录时间';
+    return;
+  }
+  if (![attitudeForm.strike, attitudeForm.dipDirection, attitudeForm.dipAngle].every(Number.isFinite)) {
+    attitudeError.value = '走向、倾向、倾角必须填写数值';
+    return;
+  }
+  if (attitudeForm.valid) {
+    if (!isValidAttitudeValue(attitudeForm.strike, 360) || !isValidAttitudeValue(attitudeForm.dipDirection, 360)) {
+      attitudeError.value = '有效测点的走向、倾向需在 0 ~ 360° 之间';
+      return;
+    }
+    if (!isValidAttitudeValue(attitudeForm.dipAngle, 90)) {
+      attitudeError.value = '有效测点的倾角需在 0 ~ 90° 之间';
+      return;
+    }
+  } else if (!attitudeForm.invalidReason.trim()) {
+    attitudeError.value = '无效测点必须填写原因后留档';
+    return;
+  }
+
+  await attitudeStore.add({
+    faceId: face.value.id,
+    position: attitudeForm.position,
+    strike: attitudeForm.strike,
+    dipDirection: attitudeForm.dipDirection,
+    dipAngle: attitudeForm.dipAngle,
+    valid: attitudeForm.valid,
+    invalidReason: attitudeForm.valid ? '' : attitudeForm.invalidReason.trim(),
+    measuredAt: attitudeForm.measuredAt.getTime(),
+  });
+  ElMessage.success(attitudeForm.valid ? '有效测点已保存，并更新当前基准' : '无效测点已连同原因留档');
+  attitudeForm.position = '拱顶';
+  attitudeForm.strike = 0;
+  attitudeForm.dipDirection = 0;
+  attitudeForm.dipAngle = 0;
+  attitudeForm.invalidReason = '';
+  attitudeForm.valid = true;
+  attitudeForm.measuredAt = new Date();
+}
+
+function attitudeRangeText(): string {
+  if (!attitudeRange.value) return '—';
+  const range = attitudeRange.value;
+  const sameDirection = range.dipDirectionMin === range.dipDirectionMax;
+  const sameAngle = range.dipAngleMin === range.dipAngleMax;
+  return `倾向 ${sameDirection ? range.dipDirectionMin : `${range.dipDirectionMin} ~ ${range.dipDirectionMax}`}°；倾角 ${
+    sameAngle ? range.dipAngleMin : `${range.dipAngleMin} ~ ${range.dipAngleMax}`
+  }°`;
+}
 
 /** SketchCanvas 变更回调（用命名函数避免模板内联箭头参数丢类型） */
 function onSketchChange(segs: { id: string }[]): void {
@@ -47,6 +155,8 @@ onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
   await gradeStore.load();
+  await attitudeStore.load();
+  fillAttitudeFormFromCurrent();
   if (face.value) {
     patch({ rockStrength: face.value.rockStrength, spanWidth: Number(face.value.faceSize.split('×')[0]) || 12 });
   }
@@ -83,7 +193,7 @@ onMounted(async () => {
             <el-descriptions-item label="开挖断面尺寸">{{ face.faceSize }} m</el-descriptions-item>
             <el-descriptions-item label="岩性 / 风化">{{ face.lithology }} / {{ face.weathering }}</el-descriptions-item>
             <el-descriptions-item label="饱和抗压强度">{{ face.rockStrength }} MPa</el-descriptions-item>
-            <el-descriptions-item label="岩层产状">
+            <el-descriptions-item label="原档案产状">
               走向 {{ face.attitude.strike }}° · {{ attitudeText(face.attitude.dipDirection, face.attitude.dipAngle) }}
             </el-descriptions-item>
             <el-descriptions-item label="地质员">{{ face.geologist }}</el-descriptions-item>
@@ -91,6 +201,116 @@ onMounted(async () => {
               {{ new Date(face.recordedAt).toLocaleString('zh-CN') }}
             </el-descriptions-item>
           </el-descriptions>
+        </el-card>
+
+        <el-card shadow="never">
+          <template #header>
+            <div class="card-head">
+              <strong>岩层产状测点</strong>
+              <el-tag type="success" effect="plain">有效 {{ validPoints.length }}</el-tag>
+              <el-tag type="danger" effect="plain">无效 {{ invalidPoints.length }}</el-tag>
+            </div>
+          </template>
+
+          <el-alert
+            :type="currentPoint ? 'success' : 'info'"
+            :closable="false"
+            show-icon
+            class="baseline-alert"
+            :title="`当前基准：走向 ${currentAttitude?.strike ?? face.attitude.strike}° · ${attitudeText(
+              currentAttitude?.dipDirection ?? face.attitude.dipDirection,
+              currentAttitude?.dipAngle ?? face.attitude.dipAngle,
+            )}`"
+            :description="`${baselineSourceText}；有效测点范围：${attitudeRangeText()}`"
+          />
+
+          <el-form :model="attitudeForm" label-width="92px" class="attitude-form">
+            <el-alert v-if="attitudeError" :title="attitudeError" type="error" :closable="false" style="margin-bottom: 10px" />
+            <el-form-item label="测点部位">
+              <el-select v-model="attitudeForm.position">
+                <el-option v-for="position in ATTITUDE_POSITIONS" :key="position" :label="position" :value="position" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="走向 °">
+              <el-input-number
+                v-model="attitudeForm.strike"
+                :min="attitudeForm.valid ? 0 : Number.NEGATIVE_INFINITY"
+                :max="attitudeForm.valid ? 360 : Number.POSITIVE_INFINITY"
+              />
+            </el-form-item>
+            <el-form-item label="倾向 °">
+              <el-input-number
+                v-model="attitudeForm.dipDirection"
+                :min="attitudeForm.valid ? 0 : Number.NEGATIVE_INFINITY"
+                :max="attitudeForm.valid ? 360 : Number.POSITIVE_INFINITY"
+              />
+            </el-form-item>
+            <el-form-item label="倾角 °">
+              <el-input-number
+                v-model="attitudeForm.dipAngle"
+                :min="attitudeForm.valid ? 0 : Number.NEGATIVE_INFINITY"
+                :max="attitudeForm.valid ? 90 : Number.POSITIVE_INFINITY"
+              />
+            </el-form-item>
+            <el-form-item label="测录时间">
+              <el-date-picker v-model="attitudeForm.measuredAt" type="datetime" placeholder="选择测录时间" />
+            </el-form-item>
+            <el-form-item label="测点状态">
+              <el-switch
+                v-model="attitudeForm.valid"
+                active-text="有效"
+                inactive-text="无效留档"
+                inline-prompt
+                @change="onValidChange"
+              />
+            </el-form-item>
+            <el-form-item v-if="!attitudeForm.valid" label="无效原因" required>
+              <el-select
+                v-model="attitudeForm.invalidReason"
+                filterable
+                allow-create
+                default-first-option
+                placeholder="选择或输入原因"
+                style="width: 260px"
+              >
+                <el-option v-for="reason in ATTITUDE_INVALID_REASONS" :key="reason" :label="reason" :value="reason" />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" @click="submitAttitudePoint">保存测点</el-button>
+              <el-button @click="fillAttitudeFormFromCurrent">按当前基准带出</el-button>
+            </el-form-item>
+          </el-form>
+
+          <el-divider content-position="left">有效测点（按测录时间倒序，最新一条为当前基准）</el-divider>
+          <el-table :data="validPoints" size="small" border>
+            <el-table-column label="基准" width="64">
+              <template #default="{ row }">
+                <el-tag v-if="currentPoint?.id === row.id" type="success" size="small">当前</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="position" label="部位" width="82" />
+            <el-table-column prop="strike" label="走向°" width="76" />
+            <el-table-column prop="dipDirection" label="倾向°" width="76" />
+            <el-table-column prop="dipAngle" label="倾角°" width="76" />
+            <el-table-column label="测录时间" min-width="170">
+              <template #default="{ row }">{{ new Date(row.measuredAt).toLocaleString('zh-CN') }}</template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="validPoints.length === 0" description="暂无有效测点，节理录入沿用原产状" :image-size="60" />
+
+          <el-divider content-position="left">无效测点留档</el-divider>
+          <el-table :data="invalidPoints" size="small" border>
+            <el-table-column prop="position" label="部位" width="82" />
+            <el-table-column prop="strike" label="走向°" width="76" />
+            <el-table-column prop="dipDirection" label="倾向°" width="76" />
+            <el-table-column prop="dipAngle" label="倾角°" width="76" />
+            <el-table-column prop="invalidReason" label="原因" min-width="150" />
+            <el-table-column label="测录时间" min-width="170">
+              <template #default="{ row }">{{ new Date(row.measuredAt).toLocaleString('zh-CN') }}</template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="invalidPoints.length === 0" description="暂无无效测点" :image-size="60" />
         </el-card>
 
         <el-card shadow="never">
@@ -138,7 +358,7 @@ onMounted(async () => {
         <SketchCanvas
           :face-id="face.id"
           :lithology="face.lithology"
-          :attitude="face.attitude"
+          :attitude="currentAttitude ?? face.attitude"
           @change="onSketchChange"
         />
       </el-card>
@@ -181,6 +401,12 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+.baseline-alert {
+  margin-bottom: 12px;
+}
+.attitude-form :deep(.el-form-item) {
+  margin-bottom: 14px;
 }
 .muted {
   color: #7b8592;

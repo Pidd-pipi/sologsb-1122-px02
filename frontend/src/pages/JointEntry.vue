@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useJointStore } from '../stores/jointStore';
+import { useAttitudeStore } from '../stores/attitudeStore';
 import JointPolarPlot from '../components/common/JointPolarPlot.vue';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
 import {
@@ -23,9 +24,19 @@ const route = useRoute();
 const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
+const attitudeStore = useAttitudeStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
+const currentAttitudePoint = computed(() => attitudeStore.validByFace(faceId.value)[0]);
+const currentAttitude = computed(() =>
+  face.value ? attitudeStore.currentAttitude(faceId.value, face.value.attitude) : undefined,
+);
+const baselineSourceText = computed(() =>
+  currentAttitudePoint.value
+    ? `当前基准来自${currentAttitudePoint.value.position}有效测点（${new Date(currentAttitudePoint.value.measuredAt).toLocaleString('zh-CN')}）`
+    : '当前掌子面无有效测点，沿用原档案产状',
+);
 const joints = computed(() => jointStore.byFace(faceId.value));
 const clusters = computed(() => clusterJoints(joints.value));
 
@@ -51,13 +62,17 @@ watch(
   (id) => {
     form.faceId = id;
     form.setNo = nextSetNo(jointStore.byFace(id).map((j) => j.setNo));
-    if (face.value) {
-      form.dipDirection = face.value.attitude.dipDirection;
-      form.dipAngle = face.value.attitude.dipAngle;
-    }
   },
   { immediate: true },
 );
+
+function applyCurrentAttitude(): void {
+  if (!currentAttitude.value) return;
+  form.dipDirection = currentAttitude.value.dipDirection;
+  form.dipAngle = currentAttitude.value.dipAngle;
+}
+
+watch(faceId, () => applyCurrentAttitude());
 
 const dipAbnormal = computed(() => isDipAbnormal(form.dipAngle));
 const apparentDipHint = computed(() => {
@@ -85,6 +100,7 @@ async function submit() {
   ElMessage.success(`已录入 J${created.setNo}：${attitudeText(created.dipDirection, created.dipAngle)}`);
   form.setNo = nextSetNo(joints.value.map((j) => j.setNo));
   form.jointCount = 5;
+  applyCurrentAttitude();
 }
 
 async function mergeCluster(clusterNo: number) {
@@ -103,6 +119,10 @@ async function mergeCluster(clusterNo: number) {
 onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
+  await attitudeStore.load();
+  form.faceId = faceId.value;
+  form.setNo = nextSetNo(joints.value.map((j) => j.setNo));
+  applyCurrentAttitude();
 });
 </script>
 
@@ -119,6 +139,15 @@ onMounted(async () => {
     <div class="grid">
       <el-card shadow="never">
         <template #header><strong>新增节理组</strong></template>
+        <el-alert
+          v-if="currentAttitude"
+          :title="`默认带出${attitudeText(currentAttitude.dipDirection, currentAttitude.dipAngle)}`"
+          :description="baselineSourceText"
+          :type="currentAttitudePoint ? 'success' : 'info'"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 10px"
+        />
         <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-bottom: 10px" />
         <el-form :model="form" label-width="110px">
           <el-form-item label="组号">
@@ -226,7 +255,11 @@ onMounted(async () => {
 
         <el-card v-if="face" shadow="never">
           <template #header><strong>岩性素描（可继续布置结构面）</strong></template>
-          <SketchCanvas :face-id="face.id" :lithology="face.lithology" :attitude="face.attitude" />
+          <SketchCanvas
+            :face-id="face.id"
+            :lithology="face.lithology"
+            :attitude="currentAttitude ?? face.attitude"
+          />
         </el-card>
       </div>
     </div>
