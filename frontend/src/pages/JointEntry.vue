@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useJointStore } from '../stores/jointStore';
+import { useAttitudeStore } from '../stores/attitudeStore';
 import JointPolarPlot from '../components/common/JointPolarPlot.vue';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
 import {
@@ -23,6 +24,7 @@ const route = useRoute();
 const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
+const attitudeStore = useAttitudeStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
@@ -31,6 +33,9 @@ const clusters = computed(() => clusterJoints(joints.value));
 
 const error = ref('');
 const mergeTarget = ref('');
+
+/** 用户手动改过产状后，不再用基准默认值覆盖输入 */
+const attitudeTouched = ref(false);
 
 const form = reactive<JointSetDraft>({
   faceId: '',
@@ -46,15 +51,30 @@ const form = reactive<JointSetDraft>({
   jointCount: 5,
 });
 
+/** 默认产状来源：当前基准测点优先；无有效测点（或旧掌子面无测点）时沿用编录产状 */
+function applyDefaultAttitude(): void {
+  if (attitudeTouched.value) return;
+  const src = attitudeStore.baselineByFace(faceId.value) ?? face.value?.attitude;
+  if (!src) return;
+  form.dipDirection = src.dipDirection;
+  form.dipAngle = src.dipAngle;
+}
+
+/** 默认值来源提示 */
+const attitudeSourceHint = computed(() => {
+  if (attitudeTouched.value) return '';
+  const baseline = attitudeStore.baselineByFace(faceId.value);
+  return baseline
+    ? `已带出当前基准（${baseline.position} ${attitudeText(baseline.dipDirection, baseline.dipAngle)}）`
+    : '无有效测点，沿用编录产状';
+});
+
 watch(
   faceId,
   (id) => {
     form.faceId = id;
     form.setNo = nextSetNo(jointStore.byFace(id).map((j) => j.setNo));
-    if (face.value) {
-      form.dipDirection = face.value.attitude.dipDirection;
-      form.dipAngle = face.value.attitude.dipAngle;
-    }
+    applyDefaultAttitude();
   },
   { immediate: true },
 );
@@ -103,6 +123,9 @@ async function mergeCluster(clusterNo: number) {
 onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
+  await attitudeStore.load();
+  // store 就绪后基准 / 编录产状才可用，补一次默认带出
+  applyDefaultAttitude();
 });
 </script>
 
@@ -126,10 +149,11 @@ onMounted(async () => {
             <span class="hint">建议 J{{ nextSetNo(joints.map((j) => j.setNo)) }}</span>
           </el-form-item>
           <el-form-item label="倾向 °">
-            <el-input-number v-model="form.dipDirection" :min="0" :max="360" />
+            <el-input-number v-model="form.dipDirection" :min="0" :max="360" @change="attitudeTouched = true" />
+            <span v-if="attitudeSourceHint" class="hint">{{ attitudeSourceHint }}</span>
           </el-form-item>
           <el-form-item label="倾角 °">
-            <el-input-number v-model="form.dipAngle" :min="0" :max="120" />
+            <el-input-number v-model="form.dipAngle" :min="0" :max="120" @change="attitudeTouched = true" />
             <span v-if="dipAbnormal" class="warn">倾角异常，需在 0~90° 之间</span>
             <span v-else class="hint">剖面夹角 30° 时视倾角约 {{ apparentDipHint }}°</span>
           </el-form-item>

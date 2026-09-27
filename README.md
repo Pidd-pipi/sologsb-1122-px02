@@ -58,8 +58,8 @@ sologsb-1122/
         ├── main.ts
         ├── App.vue
         ├── router/index.ts
-        ├── types/{face,joint,grade,water}.ts
-        ├── stores/{face,joint,grade}Store.ts
+        ├── types/{face,joint,grade,water,attitude}.ts
+        ├── stores/{face,joint,grade,attitude}Store.ts
         ├── components/common/{SketchCanvas,JointPolarPlot,GradeTag,FaceCard}.vue
         ├── hooks/{useFaceFilter,useGradeCalc}.ts
         ├── pages/{FaceList,FaceDetail,JointEntry,WaterView,GradeJudge}.vue
@@ -71,8 +71,8 @@ sologsb-1122/
 | 路由 | 页面 | 消费模型 |
 | --- | --- | --- |
 | `/faces` | 掌子面台账：里程区间/岩性/围岩级别/开挖方式筛选 + 级别分布条 | TunnelFace、RockMassGrade |
-| `/faces/:id` | 掌子面详情：基本信息 + 岩性素描图 + 节理组列表 + 与上循环级别比对 | TunnelFace、JointSet、RockMassGrade |
-| `/faces/:id/joints` | 节理产状录入：极点图/玫瑰图、同组产状合并、异常倾角提示 | JointSet |
+| `/faces/:id` | 掌子面详情：基本信息 + 产状测点（当前基准/范围）+ 岩性素描图 + 节理组列表 + 与上循环级别比对 | TunnelFace、AttitudeReading、JointSet、RockMassGrade |
+| `/faces/:id/joints` | 节理产状录入：默认带出当前基准产状，极点图/玫瑰图、同组产状合并、异常倾角提示 | JointSet、AttitudeReading |
 | `/faces/:id/water` | 涌水记录与沿里程趋势折线，标记突变点与建议措施 | WaterInflow |
 | `/grade/:faceId` | 围岩级别判定：逐项输入 RQD/Jv/Kv/出水状态，实时算级别与支护建议，可人工修正并保存 | RockMassGrade、TunnelFace |
 
@@ -80,15 +80,17 @@ sologsb-1122/
 
 ## 数据存储说明
 
-- 数据库名 `gbtunnelface`，当前结构版本 **v2**（`localStorage['gbtunnelface:db-version']` 记录）。
-- 四张表：`faces`（掌子面）、`joints`（节理组）、`grades`（围岩级别判定）、`waters`（涌水记录）。
+- 数据库名 `gbtunnelface`，当前结构版本 **v3**（`localStorage['gbtunnelface:db-version']` 记录）。
+- 五张表：`faces`（掌子面）、`joints`（节理组）、`grades`（围岩级别判定）、`waters`（涌水记录）、`attitudes`（产状测点）。
 - v1 → v2 迁移：为老掌子面补 `attitude`、`mileageRange`，为级别记录补 `correctedBq`、`manualAdjusted`，为涌水补 `chainage`，并新增索引。
+- v2 → v3 迁移：新增 `attitudes` 表；老掌子面没有测点，节理录入与详情页自动沿用 `faces.attitude` 编录产状。
 - 岩性素描的结构面线段单独存 `localStorage['gbtunnelface:sketch:<faceId>']`，刷新后仍在。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
-- 首次打开灌入 2 个示范掌子面、4 组节理、1 条级别判定与 3 条涌水记录。
+- 首次打开灌入 2 个示范掌子面、4 组节理、1 条级别判定、3 条涌水记录与 3 条产状测点（含 1 条无效留档）。
 
 ## 功能要点
 
+- **产状测点**：详情页按部位（拱顶/拱腰等）录入走向、倾向、倾角；有效测点按测录时间排列，最新一条作为当前基准并显示倾向/倾角范围；无效测点连同原因留档不删除。节理录入默认带出当前基准，无有效测点或旧掌子面无测点时沿用编录产状。
 - **围岩级别实时判定**：`BQ = 90 + 3σc + 250Kv`，`[BQ] = BQ − 100(K1 + K2 + K3)`（K1 由出水状态、K2 由洞跨取值），再按 >550/451~550/351~450/251~350/151~250/≤150 映射到 Ⅰ~Ⅵ 级，并给出对应支护建议；支持人工修正级别。
 - **级别比对**：详情页与判定页自动与上一循环级别比对，输出「变好/变差 N 级」结论。
 - **素描交互**：`<SketchCanvas>` 在图上单击即按当前岩层产状布置结构面线段，带岩性填充纹样、比例尺、图例与撤销/清空，线段本地持久化。

@@ -3,10 +3,11 @@ import type { TunnelFace } from '../types/face';
 import type { JointSet } from '../types/joint';
 import type { RockMassGrade } from '../types/grade';
 import type { WaterInflow } from '../types/water';
+import type { AttitudeReading } from '../types/attitude';
 import { newId } from './id';
 
 export const DB_NAME = 'gbtunnelface';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbtunnelface:db-version';
 
 class TunnelFaceDB extends Dexie {
@@ -14,6 +15,7 @@ class TunnelFaceDB extends Dexie {
   joints!: Table<JointSet, string>;
   grades!: Table<RockMassGrade, string>;
   waters!: Table<WaterInflow, string>;
+  attitudes!: Table<AttitudeReading, string>;
 
   constructor() {
     super(DB_NAME);
@@ -52,6 +54,10 @@ class TunnelFaceDB extends Dexie {
             if (row.chainage === undefined) row.chainage = 0;
           });
       });
+    // v3：新增产状测点表（老掌子面没有测点，沿用 faces.attitude 编录产状，无需迁移）
+    this.version(3).stores({
+      attitudes: 'id, faceId, measuredAt',
+    });
   }
 }
 
@@ -242,10 +248,46 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  await db.transaction('rw', db.faces, db.joints, db.grades, db.waters, async () => {
+  // 示范产状测点：face1 两条有效（最新一条为当前基准）+ 一条无效留档；face2 无测点
+  const attitudes: AttitudeReading[] = [
+    {
+      id: newId('att'),
+      faceId: face1,
+      position: '拱顶',
+      strike: 42,
+      dipDirection: 132,
+      dipAngle: 34,
+      valid: true,
+      measuredAt: now - 2 * day,
+    },
+    {
+      id: newId('att'),
+      faceId: face1,
+      position: '拱腰左侧',
+      strike: 15,
+      dipDirection: 285,
+      dipAngle: 78,
+      valid: false,
+      invalidReason: '罗盘贴到松动岩块，读数不可信',
+      measuredAt: now - day,
+    },
+    {
+      id: newId('att'),
+      faceId: face1,
+      position: '拱腰右侧',
+      strike: 46,
+      dipDirection: 136,
+      dipAngle: 31,
+      valid: true,
+      measuredAt: now - 6 * hour,
+    },
+  ];
+
+  await db.transaction('rw', db.faces, db.joints, db.grades, db.waters, db.attitudes, async () => {
     await db.faces.bulkPut(faces);
     await db.joints.bulkPut(joints);
     await db.grades.bulkPut(grades);
     await db.waters.bulkPut(waters);
+    await db.attitudes.bulkPut(attitudes);
   });
 }

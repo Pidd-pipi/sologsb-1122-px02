@@ -1,20 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
+import { useAttitudeStore } from '../stores/attitudeStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
 import GradeTag from '../components/common/GradeTag.vue';
 import { attitudeText, formatChainage } from '../utils/geoMath';
 import { GRADE_SUPPORT } from '../types/grade';
+import { MEASURE_POSITIONS, type AttitudeReadingDraft } from '../types/attitude';
 
 const route = useRoute();
 const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
 const gradeStore = useGradeStore();
+const attitudeStore = useAttitudeStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
@@ -25,6 +29,80 @@ const previousGrade = computed(() => grades.value[1]);
 
 const { result, patch } = useGradeCalc(() => joints.value);
 const segmentCount = ref(0);
+
+/** 产状测点：有效按测录时间排列，最新一条为当前基准；无效连同原因留档 */
+const validReadings = computed(() => attitudeStore.validByFace(faceId.value));
+const invalidReadings = computed(() => attitudeStore.invalidByFace(faceId.value));
+const baseline = computed(() => attitudeStore.baselineByFace(faceId.value));
+const range = computed(() => attitudeStore.rangeByFace(faceId.value));
+
+const readingError = ref('');
+const readingForm = reactive<AttitudeReadingDraft>({
+  faceId: '',
+  position: '拱顶',
+  strike: 0,
+  dipDirection: 0,
+  dipAngle: 0,
+});
+
+/** 表单默认带出当前基准；无有效测点时沿用编录产状，方便连续复测 */
+function resetReadingForm(): void {
+  readingForm.faceId = faceId.value;
+  const src = baseline.value ?? face.value?.attitude;
+  if (src) {
+    readingForm.strike = src.strike;
+    readingForm.dipDirection = src.dipDirection;
+    readingForm.dipAngle = src.dipAngle;
+  }
+}
+
+watch(faceId, resetReadingForm, { immediate: true });
+
+/** 倾向 / 倾角范围文字，如「倾向 128° ~ 142° · 倾角 28° ~ 46°」 */
+const rangeText = computed(() => {
+  const r = range.value;
+  if (!r) return '';
+  const fmt = ([a, b]: [number, number]) => (a === b ? `${a}°` : `${a}° ~ ${b}°`);
+  return `倾向 ${fmt(r.dipDirection)} · 倾角 ${fmt(r.dipAngle)}`;
+});
+
+async function submitReading() {
+  readingError.value = '';
+  if (!face.value) return;
+  const { strike, dipDirection, dipAngle } = readingForm;
+  if (![strike, dipDirection, dipAngle].every((v) => Number.isFinite(v))) {
+    readingError.value = '走向、倾向、倾角都必须填写数字';
+    return;
+  }
+  if (strike < 0 || strike > 360 || dipDirection < 0 || dipDirection > 360) {
+    readingError.value = '走向 / 倾向需在 0 ~ 360° 之间';
+    return;
+  }
+  if (dipAngle < 0 || dipAngle > 90) {
+    readingError.value = '倾角需在 0 ~ 90° 之间';
+    return;
+  }
+  await attitudeStore.add({ ...readingForm, faceId: faceId.value });
+  ElMessage.success(`已记录${readingForm.position}测点：走向 ${strike}°，${attitudeText(dipDirection, dipAngle)}`);
+  // 新测点成为当前基准，表单自动带出便于下一条复测
+  resetReadingForm();
+}
+
+/** 作废测点：原因必填，记录留档不删除 */
+async function invalidateReading(id: string) {
+  try {
+    const { value } = await ElMessageBox.prompt('该测点将标记为无效并留档，请填写无效原因', '作废测点', {
+      confirmButtonText: '确认作废',
+      cancelButtonText: '取消',
+      inputPlaceholder: '如：罗盘贴到松动岩块，读数不可信',
+      inputValidator: (v: string) => (v && v.trim() ? true : '必须填写无效原因'),
+    });
+    await attitudeStore.invalidate(id, value.trim());
+    ElMessage.success('已标记为无效测点并留档');
+  } catch {
+    /* 用户取消 */
+  }
+}
 
 /** SketchCanvas 变更回调（用命名函数避免模板内联箭头参数丢类型） */
 function onSketchChange(segs: { id: string }[]): void {
@@ -47,6 +125,8 @@ onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
   await gradeStore.load();
+  await attitudeStore.load();
+  resetReadingForm();
   if (face.value) {
     patch({ rockStrength: face.value.rockStrength, spanWidth: Number(face.value.faceSize.split('×')[0]) || 12 });
   }
@@ -91,6 +171,82 @@ onMounted(async () => {
               {{ new Date(face.recordedAt).toLocaleString('zh-CN') }}
             </el-descriptions-item>
           </el-descriptions>
+        </el-card>
+
+        <el-card shadow="never">
+          <template #header>
+            <div class="card-head">
+              <strong>产状测点</strong>
+              <template v-if="baseline">
+                <el-tag type="success" effect="plain">
+                  当前基准：{{ baseline.position }} · 走向 {{ baseline.strike }}° ·
+                  {{ attitudeText(baseline.dipDirection, baseline.dipAngle) }}
+                </el-tag>
+                <el-tag type="info" effect="plain">{{ rangeText }}</el-tag>
+              </template>
+              <el-tag v-else type="info" effect="plain">
+                暂无有效测点，沿用编录产状 {{ attitudeText(face.attitude.dipDirection, face.attitude.dipAngle) }}
+              </el-tag>
+            </div>
+          </template>
+
+          <el-alert v-if="readingError" :title="readingError" type="error" :closable="false" style="margin-bottom: 10px" />
+          <el-form :inline="true" @submit.prevent>
+            <el-form-item label="部位">
+              <el-select v-model="readingForm.position" style="width: 116px">
+                <el-option v-for="p in MEASURE_POSITIONS" :key="p" :label="p" :value="p" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="走向 °">
+              <el-input-number v-model="readingForm.strike" :min="0" :max="360" controls-position="right" style="width: 104px" />
+            </el-form-item>
+            <el-form-item label="倾向 °">
+              <el-input-number v-model="readingForm.dipDirection" :min="0" :max="360" controls-position="right" style="width: 104px" />
+            </el-form-item>
+            <el-form-item label="倾角 °">
+              <el-input-number v-model="readingForm.dipAngle" :min="0" :max="90" controls-position="right" style="width: 104px" />
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" @click="submitReading">记录测点</el-button>
+            </el-form-item>
+          </el-form>
+
+          <el-table :data="validReadings" size="small" border>
+            <el-table-column label="测录时间" width="160">
+              <template #default="{ row }">{{ new Date(row.measuredAt).toLocaleString('zh-CN') }}</template>
+            </el-table-column>
+            <el-table-column prop="position" label="部位" width="96" />
+            <el-table-column prop="strike" label="走向 °" width="80" />
+            <el-table-column label="倾向 ∠ 倾角" width="120">
+              <template #default="{ row }">{{ attitudeText(row.dipDirection, row.dipAngle) }}</template>
+            </el-table-column>
+            <el-table-column label="基准" width="86">
+              <template #default="{ row }">
+                <el-tag v-if="baseline && row.id === baseline.id" type="success" size="small">当前基准</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="80">
+              <template #default="{ row }">
+                <el-button size="small" type="danger" plain @click="invalidateReading(row.id)">作废</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="validReadings.length === 0" description="暂无有效测点" :image-size="60" />
+
+          <template v-if="invalidReadings.length > 0">
+            <el-divider content-position="left">无效测点留档（{{ invalidReadings.length }}）</el-divider>
+            <el-table :data="invalidReadings" size="small" border class="invalid-table">
+              <el-table-column label="测录时间" width="160">
+                <template #default="{ row }">{{ new Date(row.measuredAt).toLocaleString('zh-CN') }}</template>
+              </el-table-column>
+              <el-table-column prop="position" label="部位" width="96" />
+              <el-table-column prop="strike" label="走向 °" width="80" />
+              <el-table-column label="倾向 ∠ 倾角" width="120">
+                <template #default="{ row }">{{ attitudeText(row.dipDirection, row.dipAngle) }}</template>
+              </el-table-column>
+              <el-table-column prop="invalidReason" label="无效原因" min-width="140" show-overflow-tooltip />
+            </el-table>
+          </template>
         </el-card>
 
         <el-card shadow="never">
@@ -194,5 +350,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.invalid-table {
+  opacity: 0.72;
 }
 </style>
